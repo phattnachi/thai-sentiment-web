@@ -132,11 +132,12 @@ def train_and_save_model(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
     
-    # TfidfVectorizer specification
+    # TfidfVectorizer specification (token_pattern=r'\S+' to preserve PyThaiNLP segmented words)
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 2),
         sublinear_tf=True,
-        min_df=2
+        min_df=2,
+        token_pattern=r'\S+'
     )
     X_train_vec = vectorizer.fit_transform(X_train)
     X_test_vec = vectorizer.transform(X_test)
@@ -165,7 +166,8 @@ def train_and_save_model(
     full_vectorizer = TfidfVectorizer(
         ngram_range=(1, 2),
         sublinear_tf=True,
-        min_df=2
+        min_df=2,
+        token_pattern=r'\S+'
     )
     X_full_vec = full_vectorizer.fit_transform(X)
     full_classifier = LinearSVC(

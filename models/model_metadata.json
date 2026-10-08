@@ -1,16 +1,16 @@
 {
-  "accuracy": 80.77,
-  "precision": 77.94,
-  "recall": 84.13,
-  "f1_score": 80.92,
+  "accuracy": 82.31,
+  "precision": 88.46,
+  "recall": 73.02,
+  "f1_score": 80.0,
   "confusion_matrix": [
     [
-      52,
-      15
+      61,
+      6
     ],
     [
-      10,
-      53
+      17,
+      46
     ]
   ],
   "labels": [
@@ -24,11 +24,11 @@
   },
   "train_samples": 520,
   "test_samples": 130,
-  "vocabulary_size": 428,
+  "vocabulary_size": 431,
   "ngram_range": [
     1,
     2
   ],
   "algorithm": "TfidfVectorizer + LinearSVC",
-  "last_trained": "2026-10-08 16:16:39"
+  "last_trained": "2026-10-08 17:54:00"
 }
