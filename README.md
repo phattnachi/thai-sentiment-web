@@ -89,3 +89,31 @@ SentimentAnalysis/
 * `POST /api/upload-batch` - อัปโหลดไฟล์ `.csv` หรือ `.xlsx` สำหรับวิเคราะห์ทั้งตาราง
 * `POST /api/retrain` - สั่งให้ระบบเทรนโมเดลใหม่จากชุดข้อมูลต้นฉบับ
 * `GET /docs` - เอกสาร Interactive API Documentation (Swagger UI)
+
+---
+
+## 🌐 การนำขึ้นระบบออนไลน์ (Cloud Deployment Guide)
+
+เนื่องจาก Repository ได้ถูก Push ขึ้น GitHub ([phattnachi/thai-sentiment-web](https://github.com/phattnachi/thai-sentiment-web)) แล้ว สามารถนำขึ้นเว็บได้ฟรีตามขั้นตอนต่อไปนี้:
+
+### ทางเลือกที่ 1: Deploy บน Render.com (แนะนำ - ฟรี & ง่ายที่สุด)
+1. เข้าไปที่ [Render.com](https://render.com) แล้วเข้าสู่ระบบด้วย GitHub
+2. กด **New +** -> เลือก **Web Service**
+3. เลือกเชื่อมต่อกับ Repository: `phattnachi/thai-sentiment-web`
+4. ตั้งค่า:
+   * **Runtime:** `Python 3`
+   * **Build Command:** `pip install -r requirements.txt`
+   * **Start Command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   * **Plan:** `Free`
+5. กด **Deploy Web Service** -> รอระบบสร้างเสร็จ จะได้ URL แบบ `https://thai-sentiment-web.onrender.com` ใช้งานได้ทันที
+
+### ทางเลือกที่ 2: Deploy บน Hugging Face Spaces (ฟรี & เหมาะกับ NLP)
+1. เข้า [huggingface.co/spaces](https://huggingface.co/spaces) -> กด **Create new Space**
+2. เลือก **Space SDK:** `Docker` (ระบบมี Dockerfile พร้อมใช้งานอยู่แล้ว)
+3. เชื่อมต่อ Git Remote หรือ Import จาก GitHub `phattnachi/thai-sentiment-web`
+4. ระบบจะ Build Docker และเปิดให้ใช้งานสาธารณะทันที
+
+### ทางเลือกที่ 3: Deploy บน Railway.app
+1. เข้า [railway.app](https://railway.app) -> กด **New Project** -> **Deploy from GitHub repo**
+2. เลือก `phattnachi/thai-sentiment-web`
+3. Railway จะตรวจจับ Dockerfile หรือ Python และ Deploy ให้อัตโนมัติทันที

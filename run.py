@@ -24,8 +24,8 @@ def main():
     
     ensure_model_ready()
     
-    host = "127.0.0.1"
-    port = 8000
+    host = os.environ.get("HOST", "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
+    port = int(os.environ.get("PORT", 8000))
     url = f"http://{host}:{port}"
     
     print(f"[INFO] Starting Web Server on {url} ...")
@@ -34,11 +34,12 @@ def main():
     print("=" * 60)
     print("Press CTRL+C to stop the server.\n")
     
-    # Try opening browser after server start
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+    # Try opening browser after server start (only if running locally)
+    if host in ("127.0.0.1", "localhost") and not os.environ.get("PORT"):
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
         
     uvicorn.run("app.main:app", host=host, port=port, reload=False)
 
