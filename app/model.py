@@ -67,14 +67,55 @@ def save_custom_vocab(vocab: Dict[str, Any]) -> None:
         json.dump(vocab, f, ensure_ascii=False, indent=2)
 
 
-def add_custom_word(word: str, sentiment: str, weight: float = 2.0) -> Dict[str, Any]:
+def is_word_known_in_base_model(word: str, model_data: Optional[Dict[str, Any]] = None) -> bool:
+    """Check if a word is already in the trained base model vocabulary."""
+    if not word:
+        return False
+    word_clean = word.strip()
+    if not word_clean:
+        return False
+        
+    if model_data is None:
+        try:
+            model_data = load_model_and_metadata()
+        except Exception:
+            return False
+            
+    if model_data and "artifact" in model_data:
+        vectorizer = model_data["artifact"].get("vectorizer")
+        if vectorizer and hasattr(vectorizer, "vocabulary_"):
+            vocab = vectorizer.vocabulary_
+            word_nospace = word_clean.replace(" ", "")
+            if word_clean in vocab or word_nospace in vocab:
+                return True
+    return False
+
+
+def add_custom_word(
+    word: str, 
+    sentiment: str, 
+    weight: float = 2.0,
+    model_data: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """
     Teach a new word to the system or update its polarity.
     sentiment can be 'Positive' or 'Negative'.
+    If the word is already known in the base model vocabulary, do NOT save it.
     """
     word_clean = word.strip()
     if not word_clean:
         raise ValueError("Word cannot be empty")
+        
+    # ถ้าคำไหนรู้ ไม่ต้องบันทึก
+    if is_word_known_in_base_model(word_clean, model_data):
+        return {
+            "word": word_clean,
+            "saved": False,
+            "already_known": True,
+            "sentiment": "Known",
+            "sentiment_th": "มีในโมเดลอยู่แล้ว",
+            "message": f"คำว่า '{word_clean}' มีอยู่ในคลังคำศัพท์ของโมเดลอยู่แล้ว ไม่จำเป็นต้องบันทึก"
+        }
         
     is_pos = sentiment.lower() in ["positive", "เชิงบวก", "+", "pos"]
     standard_sentiment = "Positive" if is_pos else "Negative"
@@ -89,7 +130,9 @@ def add_custom_word(word: str, sentiment: str, weight: float = 2.0) -> Dict[str,
         "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     save_custom_vocab(vocab)
-    return vocab[word_clean]
+    res = dict(vocab[word_clean])
+    res["saved"] = True
+    return res
 
 
 def delete_custom_word(word: str) -> bool:

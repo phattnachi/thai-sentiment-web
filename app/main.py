@@ -113,8 +113,18 @@ async def get_custom_words():
 @app.post("/api/teach")
 async def teach_word_endpoint(payload: TeachWordRequest):
     """Teach a word to the system, specifying whether it is Positive or Negative."""
+    global model_state
+    if model_state is None:
+        model_state = load_model_and_metadata()
     try:
-        updated = add_custom_word(payload.word, payload.sentiment, payload.weight or 2.0)
+        updated = add_custom_word(payload.word, payload.sentiment, payload.weight or 2.0, model_state)
+        if not updated.get("saved", True):
+            return {
+                "success": False,
+                "already_known": True,
+                "message": updated.get("message", f"คำว่า '{payload.word}' มีอยู่ในพจนานุกรมของโมเดลอยู่แล้ว ไม่จำเป็นต้องบันทึก"),
+                "data": updated
+            }
         return {
             "success": True,
             "message": f"บันทึกคำว่า '{payload.word}' เป็น {updated['sentiment_th']} เรียบร้อยแล้ว",

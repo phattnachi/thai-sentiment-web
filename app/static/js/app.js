@@ -135,12 +135,33 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) {}
   }
 
+  function isWordKnown(word) {
+    if (!word) return false;
+    const cleanWord = word.trim();
+    if (!cleanWord) return false;
+    const cleanNoSpace = cleanWord.replace(/\s+/g, "");
+    const model = window.THAI_SENTIMENT_MODEL;
+    if (model && model.features) {
+      if (model.features[cleanWord] || model.features[cleanNoSpace]) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   async function teachWord(word, sentiment, weight = 2.5) {
     if (!word || !word.trim()) {
       showToast("กรุณาระบุคำศัพท์ที่ต้องการสอน", "warning");
       return;
     }
     const cleanWord = word.trim();
+
+    // ถ้าคำไหนรู้ ไม่ต้องบันทึก!
+    if (isWordKnown(cleanWord)) {
+      showToast(`คำว่า "${cleanWord}" มีอยู่ในพจนานุกรมของโมเดลอยู่แล้ว (ไม่ต้องบันทึก)`, "info");
+      return;
+    }
+
     const isPos = (sentiment === "Positive" || sentiment === "+");
     const standardSentiment = isPos ? "Positive" : "Negative";
     const valWeight = isPos ? Math.abs(weight) : -Math.abs(weight);
@@ -158,11 +179,21 @@ document.addEventListener("DOMContentLoaded", () => {
     // Sync to backend if active
     if (isApiOnline) {
       try {
-        await fetch("/api/custom-words", {
+        const resp = await fetch("/api/custom-words", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ word: cleanWord, sentiment: standardSentiment, weight: Math.abs(weight) })
         });
+        if (resp.ok) {
+          const resJson = await resp.json();
+          if (resJson.already_known) {
+            delete vocab[cleanWord];
+            saveCustomVocab(vocab);
+            showToast(resJson.message || `คำว่า "${cleanWord}" มีอยู่ในโมเดลอยู่แล้ว ไม่ต้องบันทึกซ้ำ`, "info");
+            renderVocabTab();
+            return;
+          }
+        }
       } catch (err) {}
     }
 
@@ -443,6 +474,8 @@ document.addEventListener("DOMContentLoaded", () => {
       charCounter.textContent = "0 ตัวอักษร";
       resultEmptyState.classList.remove("hidden");
       resultFilledState.classList.add("hidden");
+      const teachSystemBox = document.getElementById("teachSystemBox");
+      if (teachSystemBox) teachSystemBox.classList.add("hidden");
       singleInput.focus();
     });
   }
@@ -581,47 +614,68 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("decisionScoreVal").textContent = data.decision_score;
 
     // Teach System Box Handling (v1.2 Active Learning)
+    const teachSystemBox = document.getElementById("teachSystemBox");
     const customVocab = getCustomVocab();
-    let targetWord = "";
-    if (data.unknown_word) {
-      targetWord = data.unknown_word;
-    } else if (data.unknown_tokens && data.unknown_tokens.length > 0) {
-      targetWord = data.unknown_tokens[0];
-    } else if (data.tokens && data.tokens.length > 0) {
-      targetWord = data.tokens[0];
-    } else {
-      targetWord = (data.text || "").trim();
+
+    // ตรวจสอบว่าระบบไม่รู้จัก หรือผลลัพธ์เป็น Uncertain หรือมีคำที่ไม่รู้จัก
+    const isUnknownSentiment = data.is_unknown || data.sentiment === "Uncertain";
+    const hasUnknownTokens = data.unknown_tokens && data.unknown_tokens.length > 0;
+
+    // หาคำที่ไม่รู้จักที่ยังไม่เคยถูกสอน และไม่อยู่ในพจนานุกรมของโมเดล
+    let targetUntaughtWord = "";
+    if (data.unknown_word && !customVocab[data.unknown_word] && !isWordKnown(data.unknown_word)) {
+      targetUntaughtWord = data.unknown_word;
+    } else if (hasUnknownTokens) {
+      const found = data.unknown_tokens.find(t => !customVocab[t] && !isWordKnown(t));
+      if (found) targetUntaughtWord = found;
     }
 
-    const teachTargetWord = document.getElementById("teachTargetWord");
-    const teachStatusBadge = document.getElementById("teachStatusBadge");
-    const teachSavedFooter = document.getElementById("teachSavedFooter");
-    const teachPositiveBtn = document.getElementById("teachPositiveBtn");
-    const teachNegativeBtn = document.getElementById("teachNegativeBtn");
-    const teachRemoveBtn = document.getElementById("teachRemoveBtn");
-
-    if (teachTargetWord) teachTargetWord.textContent = targetWord;
-
-    const isAlreadyTaught = !!customVocab[targetWord];
-    if (isAlreadyTaught) {
-      const tData = customVocab[targetWord];
-      const tPos = tData.sentiment === "Positive";
-      teachStatusBadge.textContent = `สอนแล้ว: ${tPos ? 'เชิงบวก (+)' : 'เชิงลบ (-)'}`;
-      teachStatusBadge.className = `px-2.5 py-0.5 rounded-full text-[10px] font-semibold ${
-        tPos 
-          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' 
-          : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
-      }`;
-      teachSavedFooter.classList.remove("hidden");
+    // กฎสำคัญ: ถ้าคำไหนรู้ (ระบบรู้จักคำทั้งหมดและผลลัพธ์ไม่ใช่ Uncertain) -> ไม่ต้องขึ้นให้บอก! ซ่อนกล่องทันที
+    if (!isUnknownSentiment && !targetUntaughtWord) {
+      if (teachSystemBox) {
+        teachSystemBox.classList.add("hidden");
+      }
     } else {
-      teachStatusBadge.textContent = isUnknown ? "ระบบยังไม่มีข้อมูลคำนี้" : "คำในพจนานุกรมโมเดล";
-      teachStatusBadge.className = "px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300 border border-amber-300/40";
-      teachSavedFooter.classList.add("hidden");
-    }
+      // ระบบไม่รู้จักคำ หรือเป็นสถานะ Uncertain -> แสดงกล่องให้ผู้ใช้ช่วยบอก
+      if (teachSystemBox) {
+        teachSystemBox.classList.remove("hidden");
+      }
 
-    if (teachPositiveBtn) teachPositiveBtn.onclick = () => teachWord(targetWord, "Positive");
-    if (teachNegativeBtn) teachNegativeBtn.onclick = () => teachWord(targetWord, "Negative");
-    if (teachRemoveBtn) teachRemoveBtn.onclick = () => removeTaughtWord(targetWord);
+      const targetWord = targetUntaughtWord || data.unknown_word || (data.unknown_tokens && data.unknown_tokens[0]) || (data.text || "").trim();
+      const teachTargetWord = document.getElementById("teachTargetWord");
+      const teachStatusBadge = document.getElementById("teachStatusBadge");
+      const teachSavedFooter = document.getElementById("teachSavedFooter");
+      const teachPositiveBtn = document.getElementById("teachPositiveBtn");
+      const teachNegativeBtn = document.getElementById("teachNegativeBtn");
+      const teachRemoveBtn = document.getElementById("teachRemoveBtn");
+
+      if (teachTargetWord) teachTargetWord.textContent = targetWord;
+
+      const isAlreadyTaught = !!customVocab[targetWord];
+      if (isAlreadyTaught) {
+        const tData = customVocab[targetWord];
+        const tPos = tData.sentiment === "Positive";
+        if (teachStatusBadge) {
+          teachStatusBadge.textContent = `สอนแล้ว: ${tPos ? 'เชิงบวก (+)' : 'เชิงลบ (-)'}`;
+          teachStatusBadge.className = `px-2.5 py-0.5 rounded-full text-[10px] font-semibold ${
+            tPos 
+              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' 
+              : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+          }`;
+        }
+        if (teachSavedFooter) teachSavedFooter.classList.remove("hidden");
+      } else {
+        if (teachStatusBadge) {
+          teachStatusBadge.textContent = "ระบบยังไม่มีข้อมูลคำนี้";
+          teachStatusBadge.className = "px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300 border border-amber-300/40";
+        }
+        if (teachSavedFooter) teachSavedFooter.classList.add("hidden");
+      }
+
+      if (teachPositiveBtn) teachPositiveBtn.onclick = () => teachWord(targetWord, "Positive");
+      if (teachNegativeBtn) teachNegativeBtn.onclick = () => teachWord(targetWord, "Negative");
+      if (teachRemoveBtn) teachRemoveBtn.onclick = () => removeTaughtWord(targetWord);
+    }
 
     // Tokens Chips Rendering (Interactive Token Pills)
     const tokensContainer = document.getElementById("tokensContainer");
