@@ -232,58 +232,88 @@
             <div id="sentimentIcon" class="flex-shrink-0"></div>
           </div>
 
-          <!-- Teach System Box (เมื่อระบบไม่รู้ หรือต้องการสอนระบบ +/- v1.2) -->
-          <div id="teachSystemBox" class="hidden p-5 rounded-2xl bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent border border-amber-500/30 shadow-sm space-y-3 transition-all">
-            <div class="flex items-center justify-between">
+          <!-- Toggleable Teach Section: ประโยคนี้ความหมายเชิงบวกหรือลบ (ซ่อนไว้ สามารถกดเปิดได้) -->
+          <div class="space-y-2">
+            <button
+              id="toggleTeachBoxBtn"
+              type="button"
+              class="w-full px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 bg-slate-50 hover:bg-slate-100/90 dark:bg-slate-800/60 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200/80 dark:border-slate-700/80 transition-all cursor-pointer shadow-sm group"
+            >
               <div class="flex items-center gap-2">
-                <span class="text-base">💡</span>
-                <span class="text-xs font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300">
-                  ระบบไม่รู้ / ช่วยสอนระบบ (Active Learning v1.2)
+                <span class="text-sm transition-transform group-hover:scale-110">💬</span>
+                <span class="font-semibold text-slate-800 dark:text-slate-200">
+                  ประโยคนี้ความหมายเชิงบวกหรือลบ?
+                </span>
+                <span id="teachSentenceBadge" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200/50 dark:border-indigo-800/50">
+                  กดเพื่อเปิด
                 </span>
               </div>
-              <span id="teachStatusBadge" class="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300 border border-amber-300/40">
-                ระบบยังไม่มีข้อมูลคำนี้
-              </span>
-            </div>
+              <div class="flex items-center gap-1.5 text-slate-400 dark:text-slate-500">
+                <span id="toggleTeachText" class="text-[11px] hidden sm:inline">คลิกเพื่อเปิด</span>
+                <svg id="toggleTeachChevron" class="w-4 h-4 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                </svg>
+              </div>
+            </button>
 
-            <p class="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
-              คำเป้าหมาย: <strong id="teachTargetWord" class="px-2 py-0.5 rounded-md bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 border border-slate-200 dark:border-slate-700 font-mono text-sm">--</strong>
-              <span class="block text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                ถ้าระบบยังไม่รู้ หรือไม่แน่ใจ สามารถกดบอกได้ทันทีว่าคำนี้เป็นเชิงบวก (+) หรือเชิงลบ (-):
-              </span>
-            </p>
+            <!-- กล่องเนื้อหาที่ซ่อนไว้ (กดเปิดแล้วจะกางออกมา) -->
+            <div id="teachSystemBox" class="hidden p-5 rounded-2xl bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent border border-amber-500/30 shadow-sm space-y-3 transition-all">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-base">💡</span>
+                  <span class="text-xs font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300">
+                    บอกความหมายของประโยคนี้ (Active Learning v1.2)
+                  </span>
+                </div>
+                <span id="teachStatusBadge" class="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300 border border-amber-300/40">
+                  ยังไม่ได้กำหนด
+                </span>
+              </div>
 
-            <div class="grid grid-cols-2 gap-2.5 pt-1">
-              <button
-                id="teachPositiveBtn"
-                type="button"
-                class="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 active:scale-95 shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
-                title="กดบอกว่าคำนี้เป็นเชิงบวก (+)"
-              >
-                <span class="text-sm">👍</span>
-                <span>บอกว่าเป็น "เชิงบวก (+)"</span>
-              </button>
+              <div>
+                <p class="text-xs text-slate-700 dark:text-slate-300 mb-1">
+                  ประโยคเป้าหมาย:
+                </p>
+                <div id="teachTargetWord" class="p-2.5 rounded-xl bg-white/80 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-800 dark:text-slate-200 break-words leading-relaxed">
+                  --
+                </div>
+                <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-2">
+                  คุณมองว่าประโยคนี้สื่อถึงอารมณ์ความรู้สึกในทิศทางใด? (กดบอกเพื่อให้ระบบจดจำ):
+                </p>
+              </div>
 
-              <button
-                id="teachNegativeBtn"
-                type="button"
-                class="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 active:scale-95 shadow-md shadow-rose-600/20 transition-all cursor-pointer"
-                title="กดบอกว่าคำนี้เป็นเชิงลบ (-)"
-              >
-                <span class="text-sm">👎</span>
-                <span>บอกว่าเป็น "เชิงลบ (-)"</span>
-              </button>
-            </div>
+              <div class="grid grid-cols-2 gap-2.5 pt-1">
+                <button
+                  id="teachPositiveBtn"
+                  type="button"
+                  class="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 active:scale-95 shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
+                  title="กดบอกว่าประโยคนี้เป็นเชิงบวก (+)"
+                >
+                  <span class="text-sm">👍</span>
+                  <span>ประโยคนี้ "เชิงบวก (+)"</span>
+                </button>
 
-            <!-- Taught Feedback / Undo Indicator -->
-            <div id="teachSavedFooter" class="hidden pt-2 flex items-center justify-between text-[11px] border-t border-amber-200/50 dark:border-amber-800/40">
-              <span class="text-emerald-700 dark:text-emerald-400 font-medium flex items-center gap-1">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
-                บันทึกคำนี้เข้าสู่ระบบแล้ว
-              </span>
-              <button id="teachRemoveBtn" type="button" class="text-rose-600 dark:text-rose-400 hover:underline cursor-pointer font-medium">
-                ยกเลิกการสอนคำนี้ (ลบออก)
-              </button>
+                <button
+                  id="teachNegativeBtn"
+                  type="button"
+                  class="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 active:scale-95 shadow-md shadow-rose-600/20 transition-all cursor-pointer"
+                  title="กดบอกว่าประโยคนี้เป็นเชิงลบ (-)"
+                >
+                  <span class="text-sm">👎</span>
+                  <span>ประโยคนี้ "เชิงลบ (-)"</span>
+                </button>
+              </div>
+
+              <!-- Taught Feedback / Undo Indicator -->
+              <div id="teachSavedFooter" class="hidden pt-2 flex items-center justify-between text-[11px] border-t border-amber-200/50 dark:border-amber-800/40">
+                <span class="text-emerald-700 dark:text-emerald-400 font-medium flex items-center gap-1">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                  บันทึกประโยคนี้เข้าสู่ระบบแล้ว
+                </span>
+                <button id="teachRemoveBtn" type="button" class="text-rose-600 dark:text-rose-400 hover:underline cursor-pointer font-medium">
+                  ยกเลิกการสอนประโยคนี้ (ลบออก)
+                </button>
+              </div>
             </div>
           </div>
 

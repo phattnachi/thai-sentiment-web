@@ -149,15 +149,15 @@ document.addEventListener("DOMContentLoaded", () => {
     return false;
   }
 
-  async function teachWord(word, sentiment, weight = 2.5) {
+  async function teachWord(word, sentiment, weight = 2.5, isSentence = false) {
     if (!word || !word.trim()) {
-      showToast("กรุณาระบุคำศัพท์ที่ต้องการสอน", "warning");
+      showToast("กรุณาระบุข้อความที่ต้องการสอน", "warning");
       return;
     }
     const cleanWord = word.trim();
 
-    // ถ้าคำไหนรู้ ไม่ต้องบันทึก!
-    if (isWordKnown(cleanWord)) {
+    // ถ้าไม่ใช่การระบุประโยคโดยตรง และเป็นคำเดี่ยวที่มีอยู่ในพจนานุกรมโมเดลอยู่แล้ว ไม่ต้องบันทึกซ้ำ
+    if (!isSentence && isWordKnown(cleanWord)) {
       showToast(`คำว่า "${cleanWord}" มีอยู่ในพจนานุกรมของโมเดลอยู่แล้ว (ไม่ต้องบันทึก)`, "info");
       return;
     }
@@ -182,11 +182,16 @@ document.addEventListener("DOMContentLoaded", () => {
         const resp = await fetch("/api/custom-words", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ word: cleanWord, sentiment: standardSentiment, weight: Math.abs(weight) })
+          body: JSON.stringify({ 
+            word: cleanWord, 
+            sentiment: standardSentiment, 
+            weight: Math.abs(weight),
+            is_sentence: isSentence 
+          })
         });
         if (resp.ok) {
           const resJson = await resp.json();
-          if (resJson.already_known) {
+          if (resJson.already_known && !isSentence) {
             delete vocab[cleanWord];
             saveCustomVocab(vocab);
             showToast(resJson.message || `คำว่า "${cleanWord}" มีอยู่ในโมเดลอยู่แล้ว ไม่ต้องบันทึกซ้ำ`, "info");
@@ -197,7 +202,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (err) {}
     }
 
-    showToast(`สอนระบบสำเร็จ! บันทึก "${cleanWord}" เป็นคำ${isPos ? 'เชิงบวก (+)' : 'เชิงลบ (-)'}`, "success");
+    showToast(`บันทึกสำเร็จ! กำหนด "${cleanWord}" เป็น${isPos ? 'เชิงบวก (+)' : 'เชิงลบ (-)'}`, "success");
     
     // Update Vocab Tab if open
     renderVocabTab();
@@ -476,7 +481,33 @@ document.addEventListener("DOMContentLoaded", () => {
       resultFilledState.classList.add("hidden");
       const teachSystemBox = document.getElementById("teachSystemBox");
       if (teachSystemBox) teachSystemBox.classList.add("hidden");
+      const toggleTeachChevron = document.getElementById("toggleTeachChevron");
+      if (toggleTeachChevron) toggleTeachChevron.classList.remove("rotate-180");
+      const toggleTeachText = document.getElementById("toggleTeachText");
+      if (toggleTeachText) toggleTeachText.textContent = "คลิกเพื่อเปิด";
       singleInput.focus();
+    });
+  }
+
+  // Toggle Teach Sentence Box (Collapsible)
+  const toggleTeachBoxBtn = document.getElementById("toggleTeachBoxBtn");
+  const toggleTeachChevron = document.getElementById("toggleTeachChevron");
+  const toggleTeachText = document.getElementById("toggleTeachText");
+
+  if (toggleTeachBoxBtn) {
+    toggleTeachBoxBtn.addEventListener("click", () => {
+      const teachSystemBox = document.getElementById("teachSystemBox");
+      if (!teachSystemBox) return;
+      const isHidden = teachSystemBox.classList.contains("hidden");
+      if (isHidden) {
+        teachSystemBox.classList.remove("hidden");
+        if (toggleTeachChevron) toggleTeachChevron.classList.add("rotate-180");
+        if (toggleTeachText) toggleTeachText.textContent = "คลิกเพื่อซ่อน";
+      } else {
+        teachSystemBox.classList.add("hidden");
+        if (toggleTeachChevron) toggleTeachChevron.classList.remove("rotate-180");
+        if (toggleTeachText) toggleTeachText.textContent = "คลิกเพื่อเปิด";
+      }
     });
   }
 
@@ -613,69 +644,62 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("negProbBar").style.width = `${data.negative_prob}%`;
     document.getElementById("decisionScoreVal").textContent = data.decision_score;
 
-    // Teach System Box Handling (v1.2 Active Learning)
+    // Teach System Box Handling (v1.2 Active Learning - Collapsible Sentence Teaching)
     const teachSystemBox = document.getElementById("teachSystemBox");
+    const teachSentenceBadge = document.getElementById("teachSentenceBadge");
     const customVocab = getCustomVocab();
 
-    // ตรวจสอบว่าระบบไม่รู้จัก หรือผลลัพธ์เป็น Uncertain หรือมีคำที่ไม่รู้จัก
-    const isUnknownSentiment = data.is_unknown || data.sentiment === "Uncertain";
-    const hasUnknownTokens = data.unknown_tokens && data.unknown_tokens.length > 0;
+    const currentSentence = (data.text || (singleInput ? singleInput.value : "") || "").trim();
+    const teachTargetWord = document.getElementById("teachTargetWord");
+    const teachStatusBadge = document.getElementById("teachStatusBadge");
+    const teachSavedFooter = document.getElementById("teachSavedFooter");
+    const teachPositiveBtn = document.getElementById("teachPositiveBtn");
+    const teachNegativeBtn = document.getElementById("teachNegativeBtn");
+    const teachRemoveBtn = document.getElementById("teachRemoveBtn");
 
-    // หาคำที่ไม่รู้จักที่ยังไม่เคยถูกสอน และไม่อยู่ในพจนานุกรมของโมเดล
-    let targetUntaughtWord = "";
-    if (data.unknown_word && !customVocab[data.unknown_word] && !isWordKnown(data.unknown_word)) {
-      targetUntaughtWord = data.unknown_word;
-    } else if (hasUnknownTokens) {
-      const found = data.unknown_tokens.find(t => !customVocab[t] && !isWordKnown(t));
-      if (found) targetUntaughtWord = found;
-    }
+    if (teachTargetWord) teachTargetWord.textContent = currentSentence;
 
-    // กฎสำคัญ: ถ้าคำไหนรู้ (ระบบรู้จักคำทั้งหมดและผลลัพธ์ไม่ใช่ Uncertain) -> ไม่ต้องขึ้นให้บอก! ซ่อนกล่องทันที
-    if (!isUnknownSentiment && !targetUntaughtWord) {
-      if (teachSystemBox) {
-        teachSystemBox.classList.add("hidden");
+    const isAlreadyTaught = !!customVocab[currentSentence];
+    if (isAlreadyTaught) {
+      const tData = customVocab[currentSentence];
+      const tPos = tData.sentiment === "Positive";
+      if (teachSentenceBadge) {
+        teachSentenceBadge.textContent = `สอนแล้ว: ${tPos ? 'เชิงบวก (+)' : 'เชิงลบ (-)'}`;
+        teachSentenceBadge.className = `px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+          tPos 
+            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300/40' 
+            : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 border border-rose-300/40'
+        }`;
       }
+      if (teachStatusBadge) {
+        teachStatusBadge.textContent = `สอนแล้ว: ${tPos ? 'เชิงบวก (+)' : 'เชิงลบ (-)'}`;
+        teachStatusBadge.className = `px-2.5 py-0.5 rounded-full text-[10px] font-semibold ${
+          tPos 
+            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' 
+            : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+        }`;
+      }
+      if (teachSavedFooter) teachSavedFooter.classList.remove("hidden");
     } else {
-      // ระบบไม่รู้จักคำ หรือเป็นสถานะ Uncertain -> แสดงกล่องให้ผู้ใช้ช่วยบอก
-      if (teachSystemBox) {
-        teachSystemBox.classList.remove("hidden");
+      const isUnknownSentiment = data.is_unknown || data.sentiment === "Uncertain";
+      if (teachSentenceBadge) {
+        teachSentenceBadge.textContent = isUnknownSentiment ? "ไม่แน่ใจ (กดเพื่อระบุ)" : "กดเพื่อเปิด";
+        teachSentenceBadge.className = `px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+          isUnknownSentiment
+            ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300 border border-amber-300/40'
+            : 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200/50 dark:border-indigo-800/50'
+        }`;
       }
-
-      const targetWord = targetUntaughtWord || data.unknown_word || (data.unknown_tokens && data.unknown_tokens[0]) || (data.text || "").trim();
-      const teachTargetWord = document.getElementById("teachTargetWord");
-      const teachStatusBadge = document.getElementById("teachStatusBadge");
-      const teachSavedFooter = document.getElementById("teachSavedFooter");
-      const teachPositiveBtn = document.getElementById("teachPositiveBtn");
-      const teachNegativeBtn = document.getElementById("teachNegativeBtn");
-      const teachRemoveBtn = document.getElementById("teachRemoveBtn");
-
-      if (teachTargetWord) teachTargetWord.textContent = targetWord;
-
-      const isAlreadyTaught = !!customVocab[targetWord];
-      if (isAlreadyTaught) {
-        const tData = customVocab[targetWord];
-        const tPos = tData.sentiment === "Positive";
-        if (teachStatusBadge) {
-          teachStatusBadge.textContent = `สอนแล้ว: ${tPos ? 'เชิงบวก (+)' : 'เชิงลบ (-)'}`;
-          teachStatusBadge.className = `px-2.5 py-0.5 rounded-full text-[10px] font-semibold ${
-            tPos 
-              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' 
-              : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
-          }`;
-        }
-        if (teachSavedFooter) teachSavedFooter.classList.remove("hidden");
-      } else {
-        if (teachStatusBadge) {
-          teachStatusBadge.textContent = "ระบบยังไม่มีข้อมูลคำนี้";
-          teachStatusBadge.className = "px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300 border border-amber-300/40";
-        }
-        if (teachSavedFooter) teachSavedFooter.classList.add("hidden");
+      if (teachStatusBadge) {
+        teachStatusBadge.textContent = isUnknownSentiment ? "ระบบยังไม่แน่ใจในประโยคนี้" : "ยังไม่ได้กำหนด";
+        teachStatusBadge.className = "px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border border-slate-200 dark:border-slate-700";
       }
-
-      if (teachPositiveBtn) teachPositiveBtn.onclick = () => teachWord(targetWord, "Positive");
-      if (teachNegativeBtn) teachNegativeBtn.onclick = () => teachWord(targetWord, "Negative");
-      if (teachRemoveBtn) teachRemoveBtn.onclick = () => removeTaughtWord(targetWord);
+      if (teachSavedFooter) teachSavedFooter.classList.add("hidden");
     }
+
+    if (teachPositiveBtn) teachPositiveBtn.onclick = () => teachWord(currentSentence, "Positive", 3.0, true);
+    if (teachNegativeBtn) teachNegativeBtn.onclick = () => teachWord(currentSentence, "Negative", 3.0, true);
+    if (teachRemoveBtn) teachRemoveBtn.onclick = () => removeTaughtWord(currentSentence);
 
     // Tokens Chips Rendering (Interactive Token Pills)
     const tokensContainer = document.getElementById("tokensContainer");

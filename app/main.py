@@ -65,6 +65,7 @@ class TeachWordRequest(BaseModel):
     word: str = Field(..., description="Thai word or phrase to teach", min_length=1)
     sentiment: str = Field(..., description="Sentiment polarity: Positive or Negative")
     weight: Optional[float] = Field(2.0, description="Confidence impact weight (default: 2.0)")
+    is_sentence: Optional[bool] = Field(False, description="Whether this is a full sentence specification")
 
 
 @app.get("/api/health")
@@ -117,7 +118,13 @@ async def teach_word_endpoint(payload: TeachWordRequest):
     if model_state is None:
         model_state = load_model_and_metadata()
     try:
-        updated = add_custom_word(payload.word, payload.sentiment, payload.weight or 2.0, model_state)
+        updated = add_custom_word(
+            payload.word, 
+            payload.sentiment, 
+            payload.weight or 2.0, 
+            model_state, 
+            is_sentence=payload.is_sentence or False
+        )
         if not updated.get("saved", True):
             return {
                 "success": False,

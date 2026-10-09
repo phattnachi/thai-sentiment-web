@@ -95,19 +95,20 @@ def add_custom_word(
     word: str, 
     sentiment: str, 
     weight: float = 2.0,
-    model_data: Optional[Dict[str, Any]] = None
+    model_data: Optional[Dict[str, Any]] = None,
+    is_sentence: bool = False
 ) -> Dict[str, Any]:
     """
-    Teach a new word to the system or update its polarity.
+    Teach a new word or sentence to the system or update its polarity.
     sentiment can be 'Positive' or 'Negative'.
-    If the word is already known in the base model vocabulary, do NOT save it.
+    If the word is already known in the base model vocabulary and not an explicit sentence override, do NOT save it.
     """
     word_clean = word.strip()
     if not word_clean:
         raise ValueError("Word cannot be empty")
         
-    # ถ้าคำไหนรู้ ไม่ต้องบันทึก
-    if is_word_known_in_base_model(word_clean, model_data):
+    # ถ้าไม่ใช่การระบุประโยคโดยตรง และเป็นคำเดี่ยวที่มีในโมเดลอยู่แล้ว ไม่ต้องบันทึก
+    if not is_sentence and is_word_known_in_base_model(word_clean, model_data):
         return {
             "word": word_clean,
             "saved": False,
