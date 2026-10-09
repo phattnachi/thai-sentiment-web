@@ -14,6 +14,10 @@ from app.model import (
     predict_single_text,
     predict_batch_texts,
     train_and_save_model,
+    load_custom_vocab,
+    add_custom_word,
+    delete_custom_word,
+    clear_all_custom_words,
     DEFAULT_DATA_FILE
 )
 
@@ -22,8 +26,8 @@ logger = logging.getLogger("sentiment-app")
 
 app = FastAPI(
     title="Thai Sentiment Analysis API",
-    description="API for Thai Sentiment Analysis using LinearSVC and TfidfVectorizer with PyThaiNLP",
-    version="1.0.0"
+    description="API for Thai Sentiment Analysis with Active Learning & Custom Vocabulary (v1.2)",
+    version="1.2.0"
 )
 
 # CORS middleware for modern frontend communication
@@ -57,6 +61,11 @@ class PredictRequest(BaseModel):
 class BatchPredictRequest(BaseModel):
     texts: List[str] = Field(..., description="List of Thai sentences")
 
+class TeachWordRequest(BaseModel):
+    word: str = Field(..., description="Thai word or phrase to teach", min_length=1)
+    sentiment: str = Field(..., description="Sentiment polarity: Positive or Negative")
+    weight: Optional[float] = Field(2.0, description="Confidence impact weight (default: 2.0)")
+
 
 @app.get("/api/health")
 async def health_check():
@@ -70,14 +79,71 @@ async def health_check():
 
     is_ready = model_state is not None
     metadata = model_state.get("metadata", {}) if is_ready else {}
+    custom_vocab = load_custom_vocab()
     
     return {
         "status": "ready" if is_ready else "initializing",
         "ready": is_ready,
         "model_name": "LinearSVC + TF-IDF (PyThaiNLP)",
+        "version": "1.2.0",
         "last_trained": metadata.get("last_trained", "N/A"),
         "total_samples": metadata.get("total_samples", 0),
-        "accuracy": metadata.get("accuracy", 0.0)
+        "accuracy": metadata.get("accuracy", 0.0),
+        "custom_words_count": len(custom_vocab)
+    }
+
+
+# Custom Vocabulary & Active Learning Endpoints (v1.2)
+@app.get("/api/custom-words")
+async def get_custom_words():
+    """Retrieve all user-taught words in the custom vocabulary."""
+    vocab = load_custom_vocab()
+    words_list = list(vocab.values())
+    pos_count = sum(1 for w in words_list if w.get("sentiment") == "Positive")
+    neg_count = sum(1 for w in words_list if w.get("sentiment") == "Negative")
+    return {
+        "total": len(words_list),
+        "positive_count": pos_count,
+        "negative_count": neg_count,
+        "words": vocab
+    }
+
+
+@app.post("/api/custom-words")
+@app.post("/api/teach")
+async def teach_word_endpoint(payload: TeachWordRequest):
+    """Teach a word to the system, specifying whether it is Positive or Negative."""
+    try:
+        updated = add_custom_word(payload.word, payload.sentiment, payload.weight or 2.0)
+        return {
+            "success": True,
+            "message": f"บันทึกคำว่า '{payload.word}' เป็น {updated['sentiment_th']} เรียบร้อยแล้ว",
+            "data": updated
+        }
+    except Exception as e:
+        logger.error(f"Error teaching word: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/custom-words/{word}")
+async def delete_custom_word_endpoint(word: str):
+    """Delete a learned word from custom vocabulary."""
+    success = delete_custom_word(word)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"ไม่พบคำว่า '{word}' ในคลังคำศัพท์ที่สอน")
+    return {
+        "success": True,
+        "message": f"ลบคำว่า '{word}' ออกจากคลังคำศัพท์เรียบร้อยแล้ว"
+    }
+
+
+@app.delete("/api/custom-words")
+async def clear_all_custom_words_endpoint():
+    """Clear all taught custom words."""
+    clear_all_custom_words()
+    return {
+        "success": True,
+        "message": "ล้างคลังคำศัพท์ที่สอนระบบทั้งหมดเรียบร้อยแล้ว"
     }
 
 

@@ -46,6 +46,67 @@ DEFAULT_DATA_FILE = "เก็บข้อมูลเพื่อทำ Sentime
 MODEL_DIR = "models"
 MODEL_PATH = os.path.join(MODEL_DIR, "sentiment_model.joblib")
 METRICS_PATH = os.path.join(MODEL_DIR, "model_metadata.json")
+CUSTOM_VOCAB_PATH = os.path.join(MODEL_DIR, "custom_vocab.json")
+
+
+def load_custom_vocab() -> Dict[str, Any]:
+    """Load user-taught custom vocabulary from JSON file."""
+    if os.path.exists(CUSTOM_VOCAB_PATH):
+        try:
+            with open(CUSTOM_VOCAB_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load custom vocabulary: {e}")
+    return {}
+
+
+def save_custom_vocab(vocab: Dict[str, Any]) -> None:
+    """Save user-taught custom vocabulary to JSON file."""
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    with open(CUSTOM_VOCAB_PATH, "w", encoding="utf-8") as f:
+        json.dump(vocab, f, ensure_ascii=False, indent=2)
+
+
+def add_custom_word(word: str, sentiment: str, weight: float = 2.0) -> Dict[str, Any]:
+    """
+    Teach a new word to the system or update its polarity.
+    sentiment can be 'Positive' or 'Negative'.
+    """
+    word_clean = word.strip()
+    if not word_clean:
+        raise ValueError("Word cannot be empty")
+        
+    is_pos = sentiment.lower() in ["positive", "เชิงบวก", "+", "pos"]
+    standard_sentiment = "Positive" if is_pos else "Negative"
+    val_weight = abs(float(weight)) if is_pos else -abs(float(weight))
+    
+    vocab = load_custom_vocab()
+    vocab[word_clean] = {
+        "word": word_clean,
+        "sentiment": standard_sentiment,
+        "sentiment_th": "เชิงบวก (+)" if is_pos else "เชิงลบ (-)",
+        "weight": val_weight,
+        "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    save_custom_vocab(vocab)
+    return vocab[word_clean]
+
+
+def delete_custom_word(word: str) -> bool:
+    """Delete a user-taught word from the custom vocabulary."""
+    word_clean = word.strip()
+    vocab = load_custom_vocab()
+    if word_clean in vocab:
+        del vocab[word_clean]
+        save_custom_vocab(vocab)
+        return True
+    return False
+
+
+def clear_all_custom_words() -> None:
+    """Clear all user-taught words."""
+    save_custom_vocab({})
+
 
 
 def clean_text_normalization(text: str) -> str:
@@ -304,21 +365,33 @@ def extract_keywords_importance(
     return keyword_contributions[:8]
 
 
-def predict_single_text(text: str, model_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Analyze a single input sentence."""
+def predict_single_text(
+    text: str, 
+    model_data: Dict[str, Any],
+    custom_vocab: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Analyze a single input sentence with hybrid custom vocabulary and unknown word detection."""
     raw_text = text.strip() if text else ""
     if not raw_text:
         return {
             "text": "",
             "tokens": [],
+            "known_tokens": [],
+            "unknown_tokens": [],
             "sentiment": "Neutral",
             "sentiment_th": "เป็นกลาง",
             "confidence": 50.0,
             "decision_score": 0.0,
             "positive_prob": 50.0,
             "negative_prob": 50.0,
-            "keywords": []
+            "keywords": [],
+            "is_unknown": False,
+            "unknown_word": None,
+            "custom_keywords": []
         }
+        
+    if custom_vocab is None:
+        custom_vocab = load_custom_vocab()
         
     processed_text = preprocess_and_tokenize(raw_text)
     tokens = [t for t in processed_text.split() if t]
@@ -327,39 +400,99 @@ def predict_single_text(text: str, model_data: Dict[str, Any]) -> Dict[str, Any]
     vectorizer: TfidfVectorizer = artifact["vectorizer"]
     classifier: LinearSVC = artifact["classifier"]
     
-    # Transform
+    # Transform with base ML model
     vec = vectorizer.transform([processed_text])
-    # Decision function
     dec = classifier.decision_function(vec)[0]
-    
-    # Check if classifier classes are ['Negative', 'Positive']
     classes = list(classifier.classes_)
-    if classes[1] == "Positive":
-        decision_val = dec
-    else:
-        decision_val = -dec
+    decision_val = dec if classes[1] == "Positive" else -dec
+    
+    # Extract base model keywords
+    base_keywords = extract_keywords_importance(processed_text, vectorizer, classifier)
+    
+    # Check user-taught custom vocabulary matches
+    custom_keywords = []
+    custom_score_delta = 0.0
+    text_clean_nospace = raw_text.replace(" ", "")
+    
+    for cw, cdata in custom_vocab.items():
+        cw_nospace = cw.replace(" ", "")
+        if cw in raw_text or cw in processed_text or (cw_nospace in text_clean_nospace):
+            w = float(cdata.get("weight", 2.0 if cdata.get("sentiment") == "Positive" else -2.0))
+            impact = "Positive" if w > 0 else "Negative"
+            item = {
+                "word": cw,
+                "impact": impact,
+                "weight": round(w, 4),
+                "contribution": round(w, 4),
+                "abs_contribution": round(abs(w), 4),
+                "is_custom": True
+            }
+            custom_keywords.append(item)
+            custom_score_delta += w
+
+    # Combine keywords: custom words have priority
+    custom_words_set = {ck["word"] for ck in custom_keywords}
+    combined_keywords = custom_keywords + [k for k in base_keywords if k["word"] not in custom_words_set]
+    combined_keywords.sort(key=lambda k: k["abs_contribution"], reverse=True)
+    
+    # Add custom score delta
+    if custom_keywords:
+        decision_val += custom_score_delta
         
-    conf_data = calculate_confidence(decision_val)
-    keywords = extract_keywords_importance(processed_text, vectorizer, classifier)
+    # Categorize tokens into known vs unknown
+    vocab_keys = set(vectorizer.vocabulary_.keys())
+    known_tokens = [t for t in tokens if t in vocab_keys or t in custom_vocab]
+    unknown_tokens = [t for t in tokens if t not in vocab_keys and t not in custom_vocab]
     
-    sentiment_th = "เชิงบวก (Positive)" if conf_data["sentiment"] == "Positive" else "เชิงลบ (Negative)"
+    # Check if system "doesn't know" (Out of vocabulary: no base keywords and no custom words matched)
+    is_unknown = (len(base_keywords) == 0 and len(custom_keywords) == 0)
     
+    if is_unknown:
+        # System doesn't know this word/phrase
+        sentiment = "Uncertain"
+        sentiment_th = "ไม่แน่ใจ (ระบบยังไม่รู้จักคำนี้)"
+        confidence = 50.0
+        pos_prob = 50.0
+        neg_prob = 50.0
+        decision_val = 0.0
+        unknown_target = raw_text if len(tokens) <= 2 else (unknown_tokens[0] if unknown_tokens else raw_text)
+    else:
+        conf_data = calculate_confidence(decision_val)
+        sentiment = conf_data["sentiment"]
+        sentiment_th = "เชิงบวก (Positive)" if sentiment == "Positive" else "เชิงลบ (Negative)"
+        confidence = conf_data["confidence_percentage"]
+        pos_prob = conf_data["positive_prob"]
+        neg_prob = conf_data["negative_prob"]
+        unknown_target = unknown_tokens[0] if unknown_tokens else None
+
     return {
         "text": raw_text,
         "processed_text": processed_text,
         "tokens": tokens,
-        "sentiment": conf_data["sentiment"],
+        "known_tokens": known_tokens,
+        "unknown_tokens": unknown_tokens,
+        "sentiment": sentiment,
         "sentiment_th": sentiment_th,
-        "confidence": conf_data["confidence_percentage"],
-        "decision_score": conf_data["decision_score"],
-        "positive_prob": conf_data["positive_prob"],
-        "negative_prob": conf_data["negative_prob"],
-        "keywords": keywords
+        "confidence": confidence,
+        "decision_score": round(float(decision_val), 4),
+        "positive_prob": pos_prob,
+        "negative_prob": neg_prob,
+        "keywords": combined_keywords[:8],
+        "is_unknown": is_unknown,
+        "unknown_word": unknown_target,
+        "custom_keywords": custom_keywords
     }
 
 
-def predict_batch_texts(texts: List[str], model_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Analyze a list of sentences in batch mode."""
+def predict_batch_texts(
+    texts: List[str], 
+    model_data: Dict[str, Any],
+    custom_vocab: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """Analyze a list of sentences in batch mode with custom vocabulary support."""
+    if custom_vocab is None:
+        custom_vocab = load_custom_vocab()
+        
     artifact = model_data["artifact"]
     vectorizer: TfidfVectorizer = artifact["vectorizer"]
     classifier: LinearSVC = artifact["classifier"]
@@ -374,22 +507,47 @@ def predict_batch_texts(texts: List[str], model_data: Dict[str, Any]) -> List[Di
     
     for original, processed, dec in zip(texts, processed_list, decisions):
         dec_val = dec if is_pos_one else -dec
-        conf_data = calculate_confidence(dec_val)
-        sentiment_th = "เชิงบวก (Positive)" if conf_data["sentiment"] == "Positive" else "เชิงลบ (Negative)"
         
-        # Get top 3 keywords
+        # Check custom words
+        custom_matches = []
+        for cw, cdata in custom_vocab.items():
+            if cw in original or cw in processed:
+                w = float(cdata.get("weight", 2.0 if cdata.get("sentiment") == "Positive" else -2.0))
+                dec_val += w
+                custom_matches.append(cw)
+                
+        # Base keywords
         keywords = extract_keywords_importance(processed, vectorizer, classifier)[:3]
-        top_keyword_words = [k["word"] for k in keywords]
+        base_kw_words = [k["word"] for k in keywords]
+        all_kw_words = list(dict.fromkeys(custom_matches + base_kw_words))
         
-        results.append({
-            "text": original,
-            "processed_text": processed,
-            "sentiment": conf_data["sentiment"],
-            "sentiment_th": sentiment_th,
-            "confidence": conf_data["confidence_percentage"],
-            "positive_prob": conf_data["positive_prob"],
-            "negative_prob": conf_data["negative_prob"],
-            "top_keywords": ", ".join(top_keyword_words) if top_keyword_words else "-"
-        })
+        is_unknown = (len(keywords) == 0 and len(custom_matches) == 0)
+        
+        if is_unknown:
+            results.append({
+                "text": original,
+                "processed_text": processed,
+                "sentiment": "Uncertain",
+                "sentiment_th": "ไม่แน่ใจ (ระบบยังไม่รู้จักคำนี้)",
+                "confidence": 50.0,
+                "positive_prob": 50.0,
+                "negative_prob": 50.0,
+                "top_keywords": "-",
+                "is_unknown": True
+            })
+        else:
+            conf_data = calculate_confidence(dec_val)
+            sentiment_th = "เชิงบวก (Positive)" if conf_data["sentiment"] == "Positive" else "เชิงลบ (Negative)"
+            results.append({
+                "text": original,
+                "processed_text": processed,
+                "sentiment": conf_data["sentiment"],
+                "sentiment_th": sentiment_th,
+                "confidence": conf_data["confidence_percentage"],
+                "positive_prob": conf_data["positive_prob"],
+                "negative_prob": conf_data["negative_prob"],
+                "top_keywords": ", ".join(all_kw_words[:3]) if all_kw_words else "-",
+                "is_unknown": False
+            })
         
     return results

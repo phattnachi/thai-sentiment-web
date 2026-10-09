@@ -67,25 +67,176 @@ document.addEventListener("DOMContentLoaded", () => {
     if (tabId === "metricsTab") {
       fetchModelMetrics();
     }
+    if (tabId === "vocabTab") {
+      renderVocabTab();
+    }
   }
 
   navTabs.forEach(btn => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
 
-  // Client-side Machine Learning Inference Engine
+  // HTML Escape Utility
+  function escapeHtml(str) {
+    if (!str) return "";
+    return String(str).replace(/[&<>"']/g, m => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#039;'
+    }[m]));
+  }
+
+  // ==========================================
+  // CUSTOM VOCABULARY & ACTIVE LEARNING (v1.2)
+  // ==========================================
+  const CUSTOM_VOCAB_KEY = "thai_sentiment_custom_vocab";
+
+  function getCustomVocab() {
+    try {
+      const raw = localStorage.getItem(CUSTOM_VOCAB_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function saveCustomVocab(vocab) {
+    try {
+      localStorage.setItem(CUSTOM_VOCAB_KEY, JSON.stringify(vocab));
+    } catch (e) {
+      console.error("Failed to save custom vocab:", e);
+    }
+    updateVocabBadge();
+  }
+
+  function updateVocabBadge() {
+    const vocab = getCustomVocab();
+    const count = Object.keys(vocab).length;
+    const badge = document.getElementById("vocabBadgeCount");
+    if (badge) {
+      badge.textContent = count;
+    }
+  }
+
+  async function syncCustomVocabWithApi() {
+    if (!isApiOnline) return;
+    try {
+      const res = await fetch("/api/custom-words");
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.words) {
+          const local = getCustomVocab();
+          const merged = { ...data.words, ...local };
+          saveCustomVocab(merged);
+        }
+      }
+    } catch (e) {}
+  }
+
+  async function teachWord(word, sentiment, weight = 2.5) {
+    if (!word || !word.trim()) {
+      showToast("กรุณาระบุคำศัพท์ที่ต้องการสอน", "warning");
+      return;
+    }
+    const cleanWord = word.trim();
+    const isPos = (sentiment === "Positive" || sentiment === "+");
+    const standardSentiment = isPos ? "Positive" : "Negative";
+    const valWeight = isPos ? Math.abs(weight) : -Math.abs(weight);
+
+    const vocab = getCustomVocab();
+    vocab[cleanWord] = {
+      word: cleanWord,
+      sentiment: standardSentiment,
+      sentiment_th: isPos ? "เชิงบวก (+)" : "เชิงลบ (-)",
+      weight: valWeight,
+      added_at: new Date().toLocaleDateString("th-TH") + " " + new Date().toLocaleTimeString("th-TH", { hour: '2-digit', minute: '2-digit' })
+    };
+    saveCustomVocab(vocab);
+
+    // Sync to backend if active
+    if (isApiOnline) {
+      try {
+        await fetch("/api/custom-words", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ word: cleanWord, sentiment: standardSentiment, weight: Math.abs(weight) })
+        });
+      } catch (err) {}
+    }
+
+    showToast(`สอนระบบสำเร็จ! บันทึก "${cleanWord}" เป็นคำ${isPos ? 'เชิงบวก (+)' : 'เชิงลบ (-)'}`, "success");
+    
+    // Update Vocab Tab if open
+    renderVocabTab();
+
+    // Re-run single prediction if input currently contains word
+    const currentInput = document.getElementById("singleInput")?.value?.trim();
+    if (currentInput) {
+      analyzeSentiment();
+    }
+  }
+
+  async function removeTaughtWord(word) {
+    if (!word) return;
+    const cleanWord = word.trim();
+    const vocab = getCustomVocab();
+    if (vocab[cleanWord]) {
+      delete vocab[cleanWord];
+      saveCustomVocab(vocab);
+
+      if (isApiOnline) {
+        try {
+          await fetch("/api/custom-words/" + encodeURIComponent(cleanWord), {
+            method: "DELETE"
+          });
+        } catch (err) {}
+      }
+
+      showToast(`ลบคำว่า "${cleanWord}" ออกจากคลังคำศัพท์แล้ว`, "info");
+      renderVocabTab();
+      const currentInput = document.getElementById("singleInput")?.value?.trim();
+      if (currentInput) {
+        analyzeSentiment();
+      }
+    }
+  }
+
+  async function clearAllTaughtWords() {
+    if (!confirm("คุณต้องการล้างคำศัพท์ที่สอนระบบทั้งหมดใช่หรือไม่?")) return;
+    saveCustomVocab({});
+    if (isApiOnline) {
+      try {
+        await fetch("/api/custom-words", { method: "DELETE" });
+      } catch (e) {}
+    }
+    showToast("ล้างคำศัพท์ที่สอนระบบทั้งหมดเรียบร้อยแล้ว", "success");
+    renderVocabTab();
+    const currentInput = document.getElementById("singleInput")?.value?.trim();
+    if (currentInput) {
+      analyzeSentiment();
+    }
+  }
+
+  // Client-side Machine Learning Inference Engine (Hybrid with Custom Vocab)
   function predictInBrowser(rawText) {
     if (!rawText || !rawText.trim()) {
       return {
         text: "",
         tokens: [],
+        known_tokens: [],
+        unknown_tokens: [],
         sentiment: "Neutral",
         sentiment_th: "เป็นกลาง",
         confidence: 50,
         positive_prob: 50,
         negative_prob: 50,
         decision_score: 0,
-        keywords: []
+        keywords: [],
+        is_unknown: false,
+        unknown_word: null,
+        custom_keywords: []
       };
     }
 
@@ -96,9 +247,11 @@ document.addEventListener("DOMContentLoaded", () => {
     text = text.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ");
 
     const features = model.features;
+    const customVocab = getCustomVocab();
     const termCounts = {};
     const matchedTerms = [];
 
+    // Match base features
     for (const term in features) {
       const cleanTermNoSpace = term.replace(/\s+/g, "");
       let count = 0;
@@ -123,6 +276,30 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
+    // Match custom user-taught words
+    const customKeywords = [];
+    let customScoreDelta = 0;
+    const textNoSpace = text.replace(/\s+/g, "");
+
+    for (const cw in customVocab) {
+      const cData = customVocab[cw];
+      const cwNoSpace = cw.replace(/\s+/g, "");
+      if (text.includes(cw) || textNoSpace.includes(cwNoSpace)) {
+        const isPos = cData.sentiment === "Positive";
+        const w = parseFloat(cData.weight) || (isPos ? 2.5 : -2.5);
+        customKeywords.push({
+          word: cw,
+          impact: isPos ? "Positive" : "Negative",
+          weight: w,
+          contribution: w,
+          abs_contribution: Math.abs(w),
+          is_custom: true
+        });
+        customScoreDelta += w;
+      }
+    }
+
+    // Base TF-IDF Calculation
     let sumSq = 0;
     const rawTfidf = {};
     for (const term in termCounts) {
@@ -135,8 +312,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const norm = Math.sqrt(sumSq) || 1.0;
-    let decisionScore = model.intercept || 0;
-    const keywordList = [];
+    let decisionScore = (model.intercept || 0) + customScoreDelta;
+    const baseKeywordList = [];
 
     for (const term in rawTfidf) {
       const tfidfNorm = rawTfidf[term] / norm;
@@ -144,32 +321,68 @@ document.addEventListener("DOMContentLoaded", () => {
       const contribution = tfidfNorm * weight;
       decisionScore += contribution;
 
-      keywordList.push({
+      baseKeywordList.push({
         word: term,
         impact: contribution > 0 ? "Positive" : "Negative",
         weight: parseFloat(weight.toFixed(4)),
         contribution: parseFloat(contribution.toFixed(4)),
-        abs_contribution: Math.abs(contribution)
+        abs_contribution: Math.abs(contribution),
+        is_custom: false
       });
     }
 
-    keywordList.sort((a, b) => b.abs_contribution - a.abs_contribution);
+    // Combine custom and base keywords (custom words have precedence)
+    const customWordsSet = new Set(customKeywords.map(k => k.word));
+    const combinedKeywords = [...customKeywords, ...baseKeywordList.filter(k => !customWordsSet.has(k.word))];
+    combinedKeywords.sort((a, b) => b.abs_contribution - a.abs_contribution);
 
-    const probPos = 1.0 / (1.0 + Math.exp(-decisionScore));
-    const probNeg = 1.0 - probPos;
-    const isPos = decisionScore >= 0;
-    const confidence = isPos ? probPos : probNeg;
+    // Build tokens representation
+    let allTokens = [];
+    if (text.includes(" ")) {
+      allTokens = text.split(/\s+/).filter(t => t.length > 0);
+    } else {
+      const matchedTokens = [...customKeywords.map(k => k.word), ...matchedTerms];
+      allTokens = matchedTokens.length > 0 ? matchedTokens : [text];
+    }
+
+    const knownTokens = allTokens.filter(t => features[t] || customVocab[t]);
+    const unknownTokens = allTokens.filter(t => !features[t] && !customVocab[t]);
+
+    // Check if system "doesn't know" (Out of vocabulary)
+    const isUnknown = (matchedTerms.length === 0 && customKeywords.length === 0);
+
+    let probPos = 0.5;
+    let probNeg = 0.5;
+    let confidence = 0.5;
+    let sentiment = "Uncertain";
+    let sentiment_th = "ไม่แน่ใจ (ระบบยังไม่รู้จักคำนี้)";
+
+    if (isUnknown) {
+      decisionScore = 0;
+    } else {
+      probPos = 1.0 / (1.0 + Math.exp(-decisionScore));
+      probNeg = 1.0 - probPos;
+      const isPos = decisionScore >= 0;
+      confidence = isPos ? probPos : probNeg;
+      sentiment = isPos ? "Positive" : "Negative";
+      sentiment_th = isPos ? "เชิงบวก (Positive)" : "เชิงลบ (Negative)";
+    }
 
     return {
       text: rawText,
-      tokens: matchedTerms.slice(0, 12),
-      sentiment: isPos ? "Positive" : "Negative",
-      sentiment_th: isPos ? "เชิงบวก (Positive)" : "เชิงลบ (Negative)",
+      tokens: allTokens.slice(0, 15),
+      known_tokens: knownTokens,
+      unknown_tokens: unknownTokens,
+      sentiment: sentiment,
+      sentiment_th: sentiment_th,
       confidence: parseFloat((confidence * 100).toFixed(2)),
       decision_score: parseFloat(decisionScore.toFixed(4)),
       positive_prob: parseFloat((probPos * 100).toFixed(2)),
       negative_prob: parseFloat((probNeg * 100).toFixed(2)),
-      keywords: keywordList.slice(0, 8)
+      keywords: combinedKeywords.slice(0, 8),
+      is_unknown: isUnknown,
+      unknown_word: isUnknown ? rawText.trim() : (unknownTokens[0] || null),
+      custom_keywords: customKeywords
     };
   }
 
@@ -186,8 +399,9 @@ document.addEventListener("DOMContentLoaded", () => {
       if (data.ready) {
         isApiOnline = true;
         statusDot.className = "w-2.5 h-2.5 rounded-full bg-emerald-500 pulse-dot mr-2";
-        statusText.textContent = "Model Ready (Active API)";
-        modelBadge.title = `ความแม่นยำ: ${data.accuracy}% | ข้อมูลเทรน: ${data.total_samples} ตัวอย่าง`;
+        statusText.textContent = "Model Ready (Active API v1.2)";
+        modelBadge.title = `ความแม่นยำ: ${data.accuracy}% | ข้อมูลเทรน: ${data.total_samples} ตัวอย่าง | คำศัพท์ที่สอน: ${data.custom_words_count || 0} คำ`;
+        await syncCustomVocabWithApi();
         return;
       }
     } catch (err) {
@@ -301,13 +515,20 @@ document.addEventListener("DOMContentLoaded", () => {
     resultEmptyState.classList.add("hidden");
     resultFilledState.classList.remove("hidden");
 
+    const isUnknown = data.is_unknown || data.sentiment === "Uncertain";
     const isPositive = data.sentiment === "Positive";
     const sentimentCard = document.getElementById("sentimentCard");
     const sentimentTitle = document.getElementById("sentimentTitle");
     const sentimentDesc = document.getElementById("sentimentDesc");
     const sentimentIcon = document.getElementById("sentimentIcon");
 
-    if (isPositive) {
+    if (isUnknown) {
+      sentimentCard.className = "p-5 rounded-2xl bg-gradient-to-br from-amber-500/15 via-amber-500/5 to-transparent border border-amber-500/40 text-amber-900 dark:text-amber-200 shadow-sm transition-all";
+      sentimentTitle.textContent = "ไม่แน่ใจ (ระบบยังไม่รู้จักคำนี้)";
+      sentimentTitle.className = "text-xl font-bold text-amber-600 dark:text-amber-400";
+      sentimentDesc.textContent = "ไม่พบคีย์เวิร์ดในฐานข้อมูลโมเดล — สามารถกดบอกขั้วอารมณ์ด้านล่างเพื่อสอนระบบได้ทันที";
+      sentimentIcon.innerHTML = `<svg class="w-10 h-10 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`;
+    } else if (isPositive) {
       sentimentCard.className = "p-5 rounded-2xl bg-gradient-to-br from-emerald-500/10 via-emerald-500/5 to-transparent border border-emerald-500/30 text-emerald-800 dark:text-emerald-300 shadow-sm transition-all";
       sentimentTitle.textContent = "ความรู้สึกเชิงบวก (Positive)";
       sentimentTitle.className = "text-xl font-bold text-emerald-700 dark:text-emerald-400";
@@ -333,17 +554,23 @@ document.addEventListener("DOMContentLoaded", () => {
     const offset = circumference - (conf / 100) * circumference;
     gaugeCircle.style.strokeDasharray = `${circumference}`;
     gaugeCircle.style.strokeDashoffset = `${offset}`;
-    gaugeCircle.style.stroke = isPositive ? "#10b981" : "#f43f5e";
 
-    if (conf >= 85) {
-      gaugeTextBadge.textContent = "ความมั่นใจสูงมาก";
-      gaugeTextBadge.className = "px-2.5 py-1 text-xs rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 font-medium";
-    } else if (conf >= 70) {
-      gaugeTextBadge.textContent = "ความมั่นใจปานกลาง";
-      gaugeTextBadge.className = "px-2.5 py-1 text-xs rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300 font-medium";
-    } else {
-      gaugeTextBadge.textContent = "ความมั่นใจระดับเริ่มต้น";
+    if (isUnknown) {
+      gaugeCircle.style.stroke = "#f59e0b";
+      gaugeTextBadge.textContent = "ระบบยังไม่รู้จักคำนี้";
       gaugeTextBadge.className = "px-2.5 py-1 text-xs rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 font-medium";
+    } else {
+      gaugeCircle.style.stroke = isPositive ? "#10b981" : "#f43f5e";
+      if (conf >= 85) {
+        gaugeTextBadge.textContent = "ความมั่นใจสูงมาก";
+        gaugeTextBadge.className = "px-2.5 py-1 text-xs rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 font-medium";
+      } else if (conf >= 70) {
+        gaugeTextBadge.textContent = "ความมั่นใจปานกลาง";
+        gaugeTextBadge.className = "px-2.5 py-1 text-xs rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300 font-medium";
+      } else {
+        gaugeTextBadge.textContent = "ความมั่นใจระดับเริ่มต้น";
+        gaugeTextBadge.className = "px-2.5 py-1 text-xs rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 font-medium";
+      }
     }
 
     // Probability Bars
@@ -353,15 +580,97 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("negProbBar").style.width = `${data.negative_prob}%`;
     document.getElementById("decisionScoreVal").textContent = data.decision_score;
 
-    // Tokens Chips
+    // Teach System Box Handling (v1.2 Active Learning)
+    const customVocab = getCustomVocab();
+    let targetWord = "";
+    if (data.unknown_word) {
+      targetWord = data.unknown_word;
+    } else if (data.unknown_tokens && data.unknown_tokens.length > 0) {
+      targetWord = data.unknown_tokens[0];
+    } else if (data.tokens && data.tokens.length > 0) {
+      targetWord = data.tokens[0];
+    } else {
+      targetWord = (data.text || "").trim();
+    }
+
+    const teachTargetWord = document.getElementById("teachTargetWord");
+    const teachStatusBadge = document.getElementById("teachStatusBadge");
+    const teachSavedFooter = document.getElementById("teachSavedFooter");
+    const teachPositiveBtn = document.getElementById("teachPositiveBtn");
+    const teachNegativeBtn = document.getElementById("teachNegativeBtn");
+    const teachRemoveBtn = document.getElementById("teachRemoveBtn");
+
+    if (teachTargetWord) teachTargetWord.textContent = targetWord;
+
+    const isAlreadyTaught = !!customVocab[targetWord];
+    if (isAlreadyTaught) {
+      const tData = customVocab[targetWord];
+      const tPos = tData.sentiment === "Positive";
+      teachStatusBadge.textContent = `สอนแล้ว: ${tPos ? 'เชิงบวก (+)' : 'เชิงลบ (-)'}`;
+      teachStatusBadge.className = `px-2.5 py-0.5 rounded-full text-[10px] font-semibold ${
+        tPos 
+          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' 
+          : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+      }`;
+      teachSavedFooter.classList.remove("hidden");
+    } else {
+      teachStatusBadge.textContent = isUnknown ? "ระบบยังไม่มีข้อมูลคำนี้" : "คำในพจนานุกรมโมเดล";
+      teachStatusBadge.className = "px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300 border border-amber-300/40";
+      teachSavedFooter.classList.add("hidden");
+    }
+
+    if (teachPositiveBtn) teachPositiveBtn.onclick = () => teachWord(targetWord, "Positive");
+    if (teachNegativeBtn) teachNegativeBtn.onclick = () => teachWord(targetWord, "Negative");
+    if (teachRemoveBtn) teachRemoveBtn.onclick = () => removeTaughtWord(targetWord);
+
+    // Tokens Chips Rendering (Interactive Token Pills)
     const tokensContainer = document.getElementById("tokensContainer");
     tokensContainer.innerHTML = "";
-    if (data.tokens && data.tokens.length > 0) {
-      data.tokens.forEach(tok => {
-        const span = document.createElement("span");
-        span.className = "px-2.5 py-1 rounded-md text-xs font-medium bg-slate-100 dark:bg-slate-700/60 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-600";
-        span.textContent = tok;
-        tokensContainer.appendChild(span);
+    const tokens = data.tokens || [];
+    if (tokens.length > 0) {
+      tokens.forEach(tok => {
+        const div = document.createElement("div");
+        const isCustom = !!customVocab[tok];
+        const isKnown = (window.THAI_SENTIMENT_MODEL && window.THAI_SENTIMENT_MODEL.features && window.THAI_SENTIMENT_MODEL.features[tok]);
+
+        if (isCustom) {
+          const cPos = customVocab[tok].sentiment === "Positive";
+          div.className = `inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold ${
+            cPos 
+              ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800' 
+              : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-300 dark:border-rose-800'
+          }`;
+          div.innerHTML = `
+            <span>✨ ${escapeHtml(tok)}</span>
+            <span class="text-[10px] opacity-80 font-bold">${cPos ? '(+)' : '(-)'}</span>
+            <button type="button" class="text-slate-400 hover:text-rose-600 font-bold ml-1 text-sm leading-none" title="ลบคำที่สอน">×</button>
+          `;
+          div.querySelector("button").onclick = (e) => {
+            e.stopPropagation();
+            removeTaughtWord(tok);
+          };
+        } else if (isKnown) {
+          div.className = "inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-100 dark:bg-slate-700/60 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-600";
+          div.textContent = tok;
+        } else {
+          // Unknown token! Give user mini buttons [+] and [-]
+          div.className = "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-200 border border-dashed border-amber-300 dark:border-amber-700";
+          div.innerHTML = `
+            <span>${escapeHtml(tok)}</span>
+            <span class="text-[10px] text-amber-500 font-bold">❓</span>
+            <button type="button" class="btn-teach-pos text-emerald-600 hover:text-emerald-800 font-bold px-1 rounded hover:bg-emerald-100 dark:hover:bg-emerald-950 transition-colors" title="สอนว่าคำนี้เป็น เชิงบวก (+)">[+]</button>
+            <button type="button" class="btn-teach-neg text-rose-600 hover:text-rose-800 font-bold px-1 rounded hover:bg-rose-100 dark:hover:bg-rose-950 transition-colors" title="สอนว่าคำนี้เป็น เชิงลบ (-)">[-]</button>
+          `;
+          div.querySelector(".btn-teach-pos").onclick = (e) => {
+            e.stopPropagation();
+            teachWord(tok, "Positive");
+          };
+          div.querySelector(".btn-teach-neg").onclick = (e) => {
+            e.stopPropagation();
+            teachWord(tok, "Negative");
+          };
+        }
+        tokensContainer.appendChild(div);
       });
     } else {
       tokensContainer.innerHTML = `<span class="text-xs text-slate-400">คำประโยคพื้นฐาน</span>`;
@@ -382,7 +691,8 @@ document.addEventListener("DOMContentLoaded", () => {
         badge.innerHTML = `
           <div class="flex items-center gap-1.5 font-semibold">
             <span>${isPos ? '🟢' : '🔴'}</span>
-            <span>${kw.word}</span>
+            <span>${escapeHtml(kw.word)}</span>
+            ${kw.is_custom ? '<span class="text-[9px] px-1.5 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 font-bold uppercase tracking-wider">ผู้ใช้สอน</span>' : ''}
           </div>
           <div class="text-[11px] opacity-80">
             ${isPos ? 'ผลักดันเชิงบวก' : 'ผลักดันเชิงลบ'} (${kw.weight > 0 ? '+' : ''}${kw.weight})
@@ -391,9 +701,157 @@ document.addEventListener("DOMContentLoaded", () => {
         keywordsContainer.appendChild(badge);
       });
     } else {
-      keywordsContainer.innerHTML = `<p class="text-xs text-slate-400">โมเดลใช้โครงสร้างภาพรวมของประโยคในการจำแนก</p>`;
+      if (isUnknown) {
+        keywordsContainer.innerHTML = `
+          <div class="p-3 rounded-xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300 text-xs">
+            ⚠️ ไม่พบคีย์เวิร์ดในโมเดลความรู้สึกสำหรับข้อความนี้ กรุณาใช้กล่องสอนระบบด้านบนเพื่อระบุขั้วอารมณ์
+          </div>
+        `;
+      } else {
+        keywordsContainer.innerHTML = `<p class="text-xs text-slate-400">โมเดลใช้โครงสร้างภาพรวมของประโยคในการจำแนก</p>`;
+      }
     }
   }
+
+  // Vocab Tab Management
+  function renderVocabTab() {
+    const vocab = getCustomVocab();
+    const wordsList = Object.values(vocab);
+
+    const totalEl = document.getElementById("vocabStatTotal");
+    const posEl = document.getElementById("vocabStatPos");
+    const negEl = document.getElementById("vocabStatNeg");
+    const badgeEl = document.getElementById("vocabBadgeCount");
+    const tableBody = document.getElementById("vocabTableBody");
+    const emptyState = document.getElementById("vocabEmptyState");
+    const searchInput = document.getElementById("vocabSearchInput");
+
+    const posCount = wordsList.filter(w => w.sentiment === "Positive").length;
+    const negCount = wordsList.filter(w => w.sentiment === "Negative").length;
+
+    if (totalEl) totalEl.textContent = wordsList.length;
+    if (posEl) posEl.textContent = posCount;
+    if (negEl) negEl.textContent = negCount;
+    if (badgeEl) badgeEl.textContent = wordsList.length;
+
+    if (!tableBody) return;
+
+    const searchTerm = (searchInput ? searchInput.value.trim().toLowerCase() : "");
+    const filtered = wordsList.filter(w => !searchTerm || w.word.toLowerCase().includes(searchTerm));
+
+    tableBody.innerHTML = "";
+
+    if (filtered.length === 0) {
+      if (emptyState) emptyState.classList.remove("hidden");
+    } else {
+      if (emptyState) emptyState.classList.add("hidden");
+      filtered.forEach(item => {
+        const isPos = item.sentiment === "Positive";
+        const tr = document.createElement("tr");
+        tr.className = "hover:bg-slate-50/70 dark:hover:bg-slate-800/40 transition-colors";
+        tr.innerHTML = `
+          <td class="px-4 py-3 font-medium text-slate-900 dark:text-slate-100 font-mono text-sm">
+            ${escapeHtml(item.word)}
+          </td>
+          <td class="px-4 py-3">
+            <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold ${
+              isPos 
+                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' 
+                : 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300'
+            }">
+              <span>${isPos ? '🟢' : '🔴'}</span>
+              <span>${isPos ? 'เชิงบวก (+)' : 'เชิงลบ (-)'}</span>
+            </span>
+          </td>
+          <td class="px-4 py-3 font-mono text-slate-500 dark:text-slate-400">
+            ${item.weight > 0 ? '+' : ''}${item.weight}
+          </td>
+          <td class="px-4 py-3 text-slate-400 text-[11px]">
+            ${item.added_at || '-'}
+          </td>
+          <td class="px-4 py-3 text-right">
+            <div class="inline-flex items-center gap-2">
+              <button
+                type="button"
+                class="btn-toggle-vocab px-2.5 py-1 rounded-lg text-[11px] font-medium bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
+                title="สลับขั้วอารมณ์"
+              >
+                สลับเป็น ${isPos ? 'ลบ (-)' : 'บวก (+)'}
+              </button>
+              <button
+                type="button"
+                class="btn-delete-vocab p-1.5 rounded-lg text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors cursor-pointer"
+                title="ลบคำศัพท์"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+              </button>
+            </div>
+          </td>
+        `;
+
+        tr.querySelector(".btn-toggle-vocab").onclick = () => {
+          teachWord(item.word, isPos ? "Negative" : "Positive", item.weight);
+        };
+        tr.querySelector(".btn-delete-vocab").onclick = () => {
+          removeTaughtWord(item.word);
+        };
+
+        tableBody.appendChild(tr);
+      });
+    }
+  }
+
+  // Vocab Tab Event Listeners
+  const addCustomWordForm = document.getElementById("addCustomWordForm");
+  const newWordInput = document.getElementById("newWordInput");
+  const newWordSentiment = document.getElementById("newWordSentiment");
+  const vocabSearchInput = document.getElementById("vocabSearchInput");
+  const exportVocabBtn = document.getElementById("exportVocabBtn");
+  const clearAllVocabBtn = document.getElementById("clearAllVocabBtn");
+
+  if (addCustomWordForm && newWordInput && newWordSentiment) {
+    addCustomWordForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const word = newWordInput.value.trim();
+      if (!word) return;
+      teachWord(word, newWordSentiment.value);
+      newWordInput.value = "";
+    });
+  }
+
+  if (vocabSearchInput) {
+    vocabSearchInput.addEventListener("input", () => {
+      renderVocabTab();
+    });
+  }
+
+  if (exportVocabBtn) {
+    exportVocabBtn.addEventListener("click", () => {
+      const vocab = getCustomVocab();
+      const count = Object.keys(vocab).length;
+      if (count === 0) {
+        showToast("ยังไม่มีคำศัพท์สำหรับส่งออก", "warning");
+        return;
+      }
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(vocab, null, 2));
+      const downloadAnchor = document.createElement("a");
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `custom_vocabulary_${new Date().toISOString().slice(0, 10)}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+      showToast("ส่งออกไฟล์ JSON สำเร็จแล้ว", "success");
+    });
+  }
+
+  if (clearAllVocabBtn) {
+    clearAllVocabBtn.addEventListener("click", () => {
+      clearAllTaughtWords();
+    });
+  }
+
+  // Initial badge update & sync
+  updateVocabBadge();
 
   // Model Metrics Tab Fetching
   async function fetchModelMetrics() {
@@ -761,30 +1219,38 @@ document.addEventListener("DOMContentLoaded", () => {
       `;
     } else {
       pageItems.forEach((row, idx) => {
+        const isUnknown = row.sentiment === "Uncertain";
         const isPos = row.sentiment === "Positive";
         const tr = document.createElement("tr");
         tr.className = "border-b border-slate-100 dark:border-slate-800/80 hover:bg-slate-50/60 dark:hover:bg-slate-800/40 transition-colors";
+        
+        let badgeHtml = "";
+        if (isUnknown) {
+          badgeHtml = `<span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">⚠️ ไม่แน่ใจ</span>`;
+        } else if (isPos) {
+          badgeHtml = `<span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">🟢 เชิงบวก</span>`;
+        } else {
+          badgeHtml = `<span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300">🔴 เชิงลบ</span>`;
+        }
+
+        const barColor = isUnknown ? 'bg-amber-500' : (isPos ? 'bg-emerald-500' : 'bg-rose-500');
+        const textColor = isUnknown ? 'text-amber-600 dark:text-amber-400' : (isPos ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400');
+
         tr.innerHTML = `
           <td class="py-3 px-3 text-xs text-slate-400 font-mono">${startIdx + idx + 1}</td>
-          <td class="py-3 px-3 text-sm text-slate-800 dark:text-slate-200 max-w-xs md:max-w-md truncate" title="${row.text}">${row.text}</td>
+          <td class="py-3 px-3 text-sm text-slate-800 dark:text-slate-200 max-w-xs md:max-w-md truncate" title="${escapeHtml(row.text)}">${escapeHtml(row.text)}</td>
           <td class="py-3 px-3">
-            <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${
-              isPos 
-                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' 
-                : 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300'
-            }">
-              ${isPos ? '🟢 เชิงบวก' : '🔴 เชิงลบ'}
-            </span>
+            ${badgeHtml}
           </td>
           <td class="py-3 px-3">
             <div class="flex items-center gap-2">
-              <span class="text-xs font-semibold ${isPos ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}">${row.confidence}%</span>
+              <span class="text-xs font-semibold ${textColor}">${row.confidence}%</span>
               <div class="w-16 bg-slate-200 dark:bg-slate-700 h-1.5 rounded-full overflow-hidden">
-                <div class="h-full ${isPos ? 'bg-emerald-500' : 'bg-rose-500'}" style="width: ${row.confidence}%"></div>
+                <div class="h-full ${barColor}" style="width: ${row.confidence}%"></div>
               </div>
             </div>
           </td>
-          <td class="py-3 px-3 text-xs text-slate-500 dark:text-slate-400">${row.top_keywords || '-'}</td>
+          <td class="py-3 px-3 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(row.top_keywords || '-')}</td>
         `;
         tableBody.appendChild(tr);
       });
